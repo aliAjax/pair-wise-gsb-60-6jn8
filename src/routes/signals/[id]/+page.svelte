@@ -3,9 +3,20 @@
   import type { SubmitFunction } from '@sveltejs/kit';
   import EvidenceMatrix from '$lib/components/EvidenceMatrix.svelte';
   import RiskBadge from '$lib/components/RiskBadge.svelte';
-  import type { AuditEntry, CaseVersion, EvidenceItem, SignalStatus } from '$lib/models/signal';
+  import type {
+    CaseVersion,
+    EvidenceItem,
+    EvidenceStrength,
+    InvestigationTaskStatus,
+    SignalStatus
+  } from '$lib/models/signal';
   import { exportSignalReport } from '$lib/services/signal-service';
-  import { signalStore } from '$lib/stores/signal-store';
+  import {
+    emptyEvidenceDraft,
+    pendingChecks,
+    signalStore,
+    type EvidenceDraft
+  } from '$lib/stores/signal-store';
   import type { ActionData, PageData } from './$types';
 
   export let data: PageData;
@@ -13,6 +24,7 @@
 
   $: signal = $signalStore.find((item) => item.id === data.id);
   $: nextVersion = (signal?.versions[0]?.version ?? 0) + 1;
+  $: activeVersions = (signal?.versions ?? []).filter((version) => (version.state ?? 'active') === 'active');
 
   const statusOptions: Array<{ value: SignalStatus; label: string }> = [
     { value: 'investigating', label: '转入调查' },
@@ -21,6 +33,43 @@
     { value: 'review', label: '提交复核' },
     { value: 'closed', label: '关闭信号' }
   ];
+
+  const taskStatusLabels: Record<InvestigationTaskStatus, string> = {
+    open: '待启动',
+    in_progress: '进行中',
+    done: '已完成',
+    paused: '已暂停关闭（待复核）'
+  };
+
+  // 证据登记表单本地状态：写入失败/重开后可由未完成核对草稿恢复
+  let evidenceForm: EvidenceDraft | null = null;
+  let evidenceWriteError = '';
+  let restoredDraftId: string | null = null;
+  $: if (signal && !evidenceForm) evidenceForm = emptyEvidenceDraft(signal);
+
+  // 结论版本表单引用的证据（默认勾选当前矩阵全部证据）
+  let versionEvidenceIds: string[] = [];
+  let versionInitKey = '';
+  $: if (signal && versionInitKey !== signal.id) {
+    versionInitKey = signal.id;
+    versionEvidenceIds = signal.evidence.map((item) => item.id);
+  }
+
+  $: signalPending = $pendingChecks.filter((item) => item.signalId === data.id);
+
+  function restoreDraft(draftId: string) {
+    const pending = signalPending.find((item) => item.draftId === draftId);
+    if (pending) {
+      evidenceForm = structuredClone(pending.form);
+      restoredDraftId = draftId;
+      evidenceWriteError = '';
+    }
+  }
+
+  function discardDraft(draftId: string) {
+    pendingChecks.clear(data.id, draftId);
+    if (restoredDraftId === draftId) restoredDraftId = null;
+  }
 
   const transitionHandler: SubmitFunction = () => {
     return async ({ result, update }) => {
@@ -40,11 +89,71 @@
       await update({ reset: true });
     };
   };
+
+  const evidenceHandler: SubmitFunction = () => {
+    // write-ahead：提交前先把未完成核对落盘，服务端校验失败或本地写入失败都不丢
+    const draft = evidenceForm ? structuredClone(evidenceForm) : null;
+    const draftId = draft ? pendingChecks.save(data.id, draft).draftId : undefined;
+
+    return async ({ result, update }) => {
+      if (result.type === 'success') {
+        const payload = result.data as {
+          evidence?: {
+            id: string;
+            type: EvidenceItem['type'];
+            title: string;
+            source: string;
+            strength: EvidenceStrength;
+            batch: string;
+            note: string;
+            referencedVersionIds?: string[];
+            createdAt: string;
+          };
+          actor?: string;
+        };
+        if (payload.evidence && signal) {
+          try {
+            // 证据登记、结论失效、批次统计在同一个原子操作内一起生效
+            signalStore.addEvidence(signal.id, {
+              ...payload.evidence,
+              actor: payload.actor ?? signal.owner
+            });
+            if (draftId) pendingChecks.clear(signal.id, draftId);
+            evidenceForm = emptyEvidenceDraft(signal);
+            restoredDraftId = null;
+            evidenceWriteError = '';
+          } catch {
+            evidenceWriteError = '本地写入失败：证据核对内容已保留为未完成核对，关闭后重开本页可恢复继续提交。';
+          }
+        }
+      }
+      await update({ reset: false });
+    };
+  };
+
+  const versionHandler: SubmitFunction = () => {
+    return async ({ result, update }) => {
+      if (result.type === 'success') {
+        const payload = result.data as { version?: CaseVersion; actor?: string };
+        if (payload.version && signal) {
+          signalStore.addVersion(
+            signal.id,
+            { ...payload.version, evidenceIds: versionEvidenceIds },
+            payload.actor ?? signal.owner
+          );
+          versionEvidenceIds = $signalStore
+            .find((item) => item.id === signal.id)
+            ?.evidence.map((item) => item.id) ?? [];
+        }
+      }
+      await update({ reset: true });
+    };
+  };
 </script>
 
 <svelte:head><title>{signal?.id ?? data.id} | 信号核查详情</title></svelte:head>
 
-{#if !signal}
+{#if !signal || !evidenceForm}
   <section class="rounded border border-error-300 bg-error-50 p-6 text-error-900">
     未找到信号 {data.id}。它可能已被本地数据重置。
   </section>
@@ -67,6 +176,30 @@
   {#if form?.message}
     <div class="mb-5 rounded border border-error-300 bg-error-50 p-3 text-sm text-error-900">{form.message}</div>
   {/if}
+
+  {#if evidenceWriteError}
+    <div class="mb-5 rounded border border-amber-400 bg-amber-50 p-3 text-sm text-amber-900">{evidenceWriteError}</div>
+  {/if}
+
+  {#each signalPending as pending (pending.draftId)}
+    <div class="mb-3 rounded border border-amber-400 bg-amber-50 p-3 text-sm text-amber-900">
+      {#if restoredDraftId === pending.draftId}
+        <span>已载入未完成核对「{pending.form.title || '未命名证据'}」，可继续编辑后提交。</span>
+      {:else}
+        <span>
+          检测到未完成的证据核对（{pending.savedAt.slice(0, 16).replace('T', ' ')} 保存）：{pending.form.title || '未命名证据'}。
+        </span>
+      {/if}
+      <span class="ml-2 inline-flex gap-2">
+        <button class="btn btn-sm variant-soft-primary" type="button" on:click={() => restoreDraft(pending.draftId)}>
+          恢复到表单
+        </button>
+        <button class="btn btn-sm variant-ghost-surface" type="button" on:click={() => discardDraft(pending.draftId)}>
+          丢弃
+        </button>
+      </span>
+    </div>
+  {/each}
 
   <section class="workspace-grid mb-6">
     <article class="col-span-12 rounded border border-surface-300-700 bg-surface-100-900 p-4 xl:col-span-8">
@@ -153,6 +286,23 @@
     </aside>
   </section>
 
+  <section class="mb-6 rounded border border-surface-300-700 bg-surface-100-900 p-4">
+    <div class="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+      {#each signal.tasks as task (task.id)}
+        <div class="rounded border border-surface-300-700 p-3">
+          <p class="text-sm font-medium">{task.title}</p>
+          <p class="mt-1 text-xs text-surface-500-400">{task.owner} · 截止 {task.dueAt}</p>
+          <p class="mt-2 badge {task.status === 'paused' ? 'variant-soft-error' : ''}">
+            {taskStatusLabels[task.status]}
+          </p>
+          {#if task.status === 'paused'}
+            <p class="mt-2 text-xs text-error-700">原任务保留，结论复核完成前暂停关闭。</p>
+          {/if}
+        </div>
+      {/each}
+    </div>
+  </section>
+
   <section class="mb-6">
     <div class="mb-4 flex flex-wrap items-end justify-between gap-3">
       <div>
@@ -161,7 +311,12 @@
       </div>
       <span class="badge">{signal.evidence.length} 项证据</span>
     </div>
-    <EvidenceMatrix evidence={signal.evidence} />
+    <EvidenceMatrix
+      evidence={signal.evidence}
+      signalId={signal.id}
+      versions={signal.versions}
+      defaultActor={signal.owner}
+    />
   </section>
 
   <div class="grid gap-6 xl:grid-cols-2">
@@ -171,19 +326,12 @@
         class="mt-4 grid gap-4 md:grid-cols-2"
         method="POST"
         action="?/evidence"
-        use:enhance={() =>
-          async ({ result, update }) => {
-            if (result.type === 'success') {
-              const payload = result.data as { evidence?: EvidenceItem; actor?: string };
-              if (payload.evidence) signalStore.addEvidence(signal.id, payload.evidence, payload.actor ?? signal.owner);
-            }
-            await update({ reset: true });
-          }}
+        use:enhance={evidenceHandler}
       >
         <input type="hidden" name="id" value={signal.id} />
         <label>
           <span class="mb-1 block text-sm font-medium">证据类型</span>
-          <select class="select" name="evidenceType">
+          <select class="select" name="evidenceType" bind:value={evidenceForm.evidenceType}>
             <option value="complaint">投诉</option>
             <option value="repair">维修</option>
             <option value="adverse_event">不良事件</option>
@@ -194,7 +342,7 @@
         </label>
         <label>
           <span class="mb-1 block text-sm font-medium">证据强度</span>
-          <select class="select" name="strength">
+          <select class="select" name="strength" bind:value={evidenceForm.strength}>
             <option value="strong">强支持</option>
             <option value="moderate">中等支持</option>
             <option value="weak">弱支持</option>
@@ -203,23 +351,47 @@
         </label>
         <label>
           <span class="mb-1 block text-sm font-medium">证据名称</span>
-          <input class="input" name="title" />
+          <input class="input" name="title" bind:value={evidenceForm.title} />
         </label>
         <label>
           <span class="mb-1 block text-sm font-medium">来源</span>
-          <input class="input" name="source" />
+          <input class="input" name="source" bind:value={evidenceForm.source} />
         </label>
         <label>
           <span class="mb-1 block text-sm font-medium">关联批号</span>
-          <input class="input" name="batch" value={signal.batch} />
+          <input class="input" name="batch" bind:value={evidenceForm.batch} />
         </label>
         <label>
           <span class="mb-1 block text-sm font-medium">录入人</span>
-          <input class="input" name="actor" value={signal.owner} />
+          <input class="input" name="actor" bind:value={evidenceForm.actor} />
         </label>
+
+        {#if evidenceForm.strength === 'contrary'}
+          <fieldset class="rounded border border-error-300 bg-error-50/50 p-3 md:col-span-2">
+            <legend class="px-1 text-sm font-medium text-error-800">
+              该相反证据推翻哪些结论版本（勾选后这些版本将失效并进入待复核；不选默认指向全部当前有效版本）
+            </legend>
+            <div class="mt-2 flex flex-wrap gap-4">
+              {#each activeVersions as version (version.id)}
+                <label class="inline-flex items-center gap-2 text-sm">
+                  <input
+                    type="checkbox"
+                    name="contradictsVersionIds"
+                    value={version.id}
+                    bind:group={evidenceForm.contradictsVersionIds}
+                  />
+                  V{version.version}：{version.summary}
+                </label>
+              {:else}
+                <span class="text-xs text-surface-500-400">当前没有有效结论版本。</span>
+              {/each}
+            </div>
+          </fieldset>
+        {/if}
+
         <label class="md:col-span-2">
           <span class="mb-1 block text-sm font-medium">核查说明</span>
-          <textarea class="textarea" name="note" rows="3"></textarea>
+          <textarea class="textarea" name="note" rows="3" bind:value={evidenceForm.note}></textarea>
         </label>
         <div class="md:col-span-2">
           <button class="btn variant-filled-primary" type="submit">加入证据矩阵</button>
@@ -229,18 +401,14 @@
 
     <section class="rounded border border-surface-300-700 bg-surface-100-900 p-4">
       <h2 class="font-semibold">形成结论版本</h2>
+      <p class="mt-1 text-xs text-surface-500-400">
+        新结论将引用勾选的证据；其中任一证据后续标记为相反或发生强度变化，本版本即失效待复核。
+      </p>
       <form
         class="mt-4 grid gap-4 md:grid-cols-2"
         method="POST"
         action="?/version"
-        use:enhance={() =>
-          async ({ result, update }) => {
-            if (result.type === 'success') {
-              const payload = result.data as { version?: CaseVersion; actor?: string };
-              if (payload.version) signalStore.addVersion(signal.id, payload.version, payload.actor ?? signal.owner);
-            }
-            await update({ reset: true });
-          }}
+        use:enhance={versionHandler}
       >
         <input type="hidden" name="id" value={signal.id} />
         <input type="hidden" name="versionNumber" value={nextVersion} />
@@ -256,6 +424,19 @@
             <option value="corrective_action">纠正措施</option>
           </select>
         </label>
+        <fieldset class="md:col-span-2">
+          <legend class="mb-1 block text-sm font-medium">引用证据（默认全选）</legend>
+          <div class="grid gap-1 sm:grid-cols-2">
+            {#each signal.evidence as item (item.id)}
+              <label class="inline-flex items-center gap-2 text-xs">
+                <input type="checkbox" name="evidenceIds" value={item.id} bind:group={versionEvidenceIds} />
+                {item.title}
+              </label>
+            {:else}
+              <span class="text-xs text-surface-500-400">暂无证据，建议先登记证据再形成结论。</span>
+            {/each}
+          </div>
+        </fieldset>
         <label class="md:col-span-2">
           <span class="mb-1 block text-sm font-medium">结论摘要</span>
           <textarea class="textarea" name="summary" rows="2"></textarea>
@@ -276,13 +457,28 @@
       <h2 class="font-semibold">结论版本</h2>
       <div class="mt-4 space-y-4">
         {#each signal.versions as version}
-          <article class="border-l-2 border-teal-600 pl-4">
+          {@const invalidated = (version.state ?? 'active') === 'invalidated_pending_review'}
+          <article class="border-l-2 pl-4 {invalidated ? 'border-error-500' : 'border-teal-600'}">
             <div class="flex flex-wrap items-center justify-between gap-2">
               <p class="font-medium">V{version.version} · {version.author}</p>
-              <span class="text-xs text-surface-500-400">{version.createdAt.slice(0, 10)}</span>
+              <span class="badge {invalidated ? 'variant-soft-error' : 'variant-soft-primary'}">
+                {invalidated ? '已失效 · 待复核' : '有效'}
+              </span>
             </div>
             <p class="mt-2 text-sm">{version.summary}</p>
             <p class="mt-2 text-xs text-surface-500-400">{version.rationale}</p>
+            {#if version.evidenceIds && version.evidenceIds.length > 0}
+              <p class="mt-2 text-xs text-surface-500-400">
+                引用证据：{version.evidenceIds
+                  .map((evidenceId) => signal.evidence.find((item) => item.id === evidenceId)?.title ?? evidenceId)
+                  .join('、')}
+              </p>
+            {/if}
+            {#if invalidated}
+              <p class="mt-2 text-xs text-error-700">
+                失效时间 {version.invalidatedAt?.slice(0, 16).replace('T', ' ')}：{version.invalidatedReason}
+              </p>
+            {/if}
           </article>
         {:else}
           <p class="text-sm text-surface-500-400">尚未形成正式结论版本。</p>

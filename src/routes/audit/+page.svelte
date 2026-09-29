@@ -15,7 +15,9 @@
         batch: signal.batch,
         status: signal.status,
         risk: signal.riskLevel,
-        conclusion: signal.versions[0] ?? null,
+        conclusion: signal.versions.find((version) => (version.state ?? 'active') === 'active') ?? null,
+        invalidatedVersions: signal.versions.filter((version) => version.state === 'invalidated_pending_review'),
+        pausedTasks: signal.tasks.filter((task) => task.status === 'paused'),
         audit: signal.audit
       }))
     };

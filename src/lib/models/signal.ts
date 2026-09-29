@@ -11,6 +11,7 @@ export const signalStatuses = [
 
 export const riskLevels = ['low', 'medium', 'high', 'critical'] as const;
 export const evidenceStrengths = ['strong', 'moderate', 'weak', 'contrary'] as const;
+export const investigationTaskStatuses = ['open', 'in_progress', 'done', 'paused'] as const;
 
 export const createSignalSchema = z.object({
   title: z.string().trim().min(6, '信号标题至少 6 个字符'),
@@ -39,6 +40,14 @@ export const evidenceSchema = z.object({
   note: z.string().trim().min(4, '请填写核查说明')
 });
 
+export const evidenceMarkSchema = z.object({
+  id: z.string().min(1, '缺少信号标识'),
+  evidenceId: z.string().min(1, '缺少证据标识'),
+  strength: z.enum(evidenceStrengths, { message: '请选择变更后的证据强度' }),
+  reason: z.string().trim().min(4, '请填写标记变化的依据（至少 4 个字符）'),
+  actor: z.string().trim().min(2, '请填写操作人')
+});
+
 export const versionSchema = z.object({
   id: z.string().min(1),
   author: z.string().trim().min(2, '请填写版本作者'),
@@ -50,8 +59,21 @@ export const versionSchema = z.object({
 export type SignalStatus = (typeof signalStatuses)[number];
 export type RiskLevel = (typeof riskLevels)[number];
 export type EvidenceStrength = (typeof evidenceStrengths)[number];
+export type InvestigationTaskStatus = (typeof investigationTaskStatuses)[number];
 export type SignalSourceType = z.infer<typeof createSignalSchema>['sourceType'];
 export type Disposition = z.infer<typeof versionSchema>['disposition'];
+
+/** 结论版本状态：有效 / 已失效待复核（失效只追加状态，不删除原版本） */
+export type CaseVersionState = 'active' | 'invalidated_pending_review';
+
+/** 证据强度变更记录：原证据与历次标记全部保留，审计只追加 */
+export interface StrengthChange {
+  id: string;
+  strength: EvidenceStrength;
+  reason: string;
+  actor: string;
+  changedAt: string;
+}
 
 export interface EvidenceItem {
   id: string;
@@ -62,6 +84,10 @@ export interface EvidenceItem {
   batch: string;
   note: string;
   createdAt: string;
+  /** 强度变更链：首项为登记时的初始强度，之后每次标记变化向尾部追加 */
+  strengthHistory?: StrengthChange[];
+  /** 登记为相反证据时明确指向的、被其推翻的结论版本 */
+  contradictsVersionIds?: string[];
 }
 
 export interface InvestigationTask {
@@ -69,7 +95,9 @@ export interface InvestigationTask {
   title: string;
   owner: string;
   dueAt: string;
-  status: 'open' | 'in_progress' | 'done';
+  status: InvestigationTaskStatus;
+  /** 暂停关闭前的原状态，用于复核完成后恢复，原任务始终保留 */
+  pausedFrom?: InvestigationTaskStatus;
 }
 
 export interface CaseVersion {
@@ -80,6 +108,13 @@ export interface CaseVersion {
   disposition: Disposition;
   rationale: string;
   createdAt: string;
+  /** 引用的证据 ID 列表，把结论版本与证据矩阵接起来 */
+  evidenceIds?: string[];
+  state?: CaseVersionState;
+  invalidatedAt?: string;
+  invalidatedReason?: string;
+  /** 触发失效的相反/变更证据 */
+  triggerEvidenceId?: string;
 }
 
 export interface AuditEntry {
@@ -113,6 +148,8 @@ export interface SignalCase {
   versions: CaseVersion[];
   audit: AuditEntry[];
   reopenedCount: number;
+  /** 本地数据结构版本，用于旧数据分批迁移 */
+  schemaVersion?: number;
 }
 
 export interface SignalFilters {

@@ -1,5 +1,10 @@
 import { fail } from '@sveltejs/kit';
-import { evidenceSchema, transitionSchema, versionSchema } from '$lib/models/signal';
+import {
+  evidenceMarkSchema,
+  evidenceSchema,
+  transitionSchema,
+  versionSchema
+} from '$lib/models/signal';
 
 export function load({ params }) {
   return { id: params.id };
@@ -11,6 +16,11 @@ function failure(error: { issues: Array<{ message: string }> }) {
   return fail(400, {
     message: error.issues[0]?.message ?? '表单校验失败'
   });
+}
+
+function uid(prefix: string) {
+  if (globalThis.crypto?.randomUUID) return `${prefix}-${globalThis.crypto.randomUUID()}`;
+  return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
 export const actions = {
@@ -30,19 +40,32 @@ export const actions = {
     const parsed = evidenceSchema.safeParse(Object.fromEntries(formData));
     if (!parsed.success) return failure(parsed.error);
 
+    // 两个窗口同时保存时，UUID 保证两份证据记录各自独立、都会留下
     return {
       success: true,
       evidence: {
-        id: `E-${Date.now().toString(36)}`,
+        id: uid('E'),
         type: parsed.data.evidenceType,
         title: parsed.data.title,
         source: parsed.data.source,
         strength: parsed.data.strength,
         batch: parsed.data.batch,
         note: parsed.data.note,
+        referencedVersionIds: formData.getAll('contradictsVersionIds').map(String),
         createdAt: new Date().toISOString()
       },
       actor: actorName(formData)
+    };
+  },
+
+  mark: async ({ request }) => {
+    const formData = await request.formData();
+    const parsed = evidenceMarkSchema.safeParse(Object.fromEntries(formData));
+    if (!parsed.success) return failure(parsed.error);
+
+    return {
+      success: true,
+      mark: parsed.data
     };
   },
 
@@ -54,12 +77,13 @@ export const actions = {
     return {
       success: true,
       version: {
-        id: `V-${Date.now().toString(36)}`,
+        id: uid('V'),
         version: Number(formData.get('versionNumber') ?? 1),
         author: parsed.data.author,
         summary: parsed.data.summary,
         disposition: parsed.data.disposition,
         rationale: parsed.data.rationale,
+        evidenceIds: formData.getAll('evidenceIds').map(String),
         createdAt: new Date().toISOString()
       },
       actor: parsed.data.author

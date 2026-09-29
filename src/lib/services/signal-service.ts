@@ -1,5 +1,6 @@
 import { get } from 'svelte/store';
 import type { SignalCase, SignalFilters } from '$lib/models/signal';
+import { isDispositionSettled } from '$lib/services/signal-domain';
 import { signalStore } from '$lib/stores/signal-store';
 
 function wait(ms: number) {
@@ -39,7 +40,18 @@ export function exportSignalReport(id: string) {
     batch: signal.batch,
     status: signal.status,
     riskLevel: signal.riskLevel,
-    conclusion: signal.versions[0]?.summary ?? '尚未形成核查结论',
+    dispositionSettled: isDispositionSettled(signal),
+    conclusion: signal.versions.find((version) => (version.state ?? 'active') === 'active')?.summary ?? null,
+    invalidatedVersions: signal.versions
+      .filter((version) => version.state === 'invalidated_pending_review')
+      .map((version) => ({
+        version: version.version,
+        summary: version.summary,
+        invalidatedAt: version.invalidatedAt,
+        reason: version.invalidatedReason,
+        triggerEvidenceId: version.triggerEvidenceId
+      })),
+    pausedTasks: signal.tasks.filter((task) => task.status === 'paused').map((task) => task.title),
     evidence: signal.evidence,
     audit: signal.audit
   };

@@ -7,21 +7,37 @@
   $: criticalSignals = signals.filter(
     (signal) => signal.riskLevel === 'critical' || signal.riskLevel === 'high'
   );
+  $: pendingReviewSignals = signals.filter(
+    (signal) =>
+      signal.versions.length > 0 &&
+      signal.versions.every((version) => version.state === 'invalidated_pending_review')
+  );
+  $: pausedTasks = signals.flatMap((signal) => signal.tasks).filter((task) => task.status === 'paused');
   $: overdueTasks = signals.flatMap((signal) =>
     signal.tasks
-      .filter((task) => task.status !== 'done' && task.dueAt < new Date().toISOString().slice(0, 10))
+      .filter((task) => task.status !== 'done' && task.status !== 'paused' && task.dueAt < new Date().toISOString().slice(0, 10))
       .map((task) => ({ ...task, signalId: signal.id }))
   );
 
   $: metrics = [
-    { label: '开放信号', value: openSignals.length, note: '含调查、观察与处置队列' },
+    { label: '开放信号', value: openSignals.length, note: '含调查、观察、待复核与处置队列' },
     { label: '高及以上风险', value: criticalSignals.length, note: '需复核人优先确认' },
+    {
+      label: '结论待复核',
+      value: pendingReviewSignals.length,
+      note: '相反证据使原结论失效，批次不计已处置'
+    },
+    {
+      label: '暂停关闭任务',
+      value: pausedTasks.length,
+      note: '原任务保留，复核完成前暂停关闭'
+    },
     {
       label: '未关闭任务',
       value: signals.flatMap((signal) => signal.tasks).filter((task) => task.status !== 'done').length,
-      note: '跨信号调查任务'
+      note: '跨信号调查任务（含暂停）'
     },
-    { label: '逾期任务', value: overdueTasks.length, note: '按任务截止日计算' }
+    { label: '逾期任务', value: overdueTasks.length, note: '按任务截止日计算（暂停不计逾期）' }
   ];
 </script>
 
@@ -38,7 +54,7 @@
 
 <section class="workspace-grid mb-6">
   {#each metrics as metric}
-    <article class="col-span-12 rounded border border-surface-300-700 bg-surface-100-900 p-4 sm:col-span-6 xl:col-span-3">
+    <article class="col-span-12 rounded border border-surface-300-700 bg-surface-100-900 p-4 sm:col-span-6 xl:col-span-2">
       <p class="text-sm text-surface-500-400">{metric.label}</p>
       <p class="metric-value mt-2 text-3xl font-semibold">{metric.value}</p>
       <p class="mt-2 text-xs text-surface-500-400">{metric.note}</p>
@@ -79,9 +95,14 @@
       <p class="text-xs text-surface-500-400">优先处理逾期及高风险事项</p>
     </div>
     <div class="space-y-4 p-4">
-      {#each signals.flatMap((signal) => signal.tasks.map((task) => ({ ...task, signalId: signal.id }))).filter((task) => task.status !== 'done').slice(0, 5) as task}
-        <div class="border-l-2 border-amber-500 pl-3">
-          <p class="text-sm font-medium">{task.title}</p>
+      {#each signals.flatMap((signal) => signal.tasks.map((task) => ({ ...task, signalId: signal.id }))).filter((task) => task.status !== 'done').slice(0, 6) as task}
+        <div class="border-l-2 {task.status === 'paused' ? 'border-red-500' : 'border-amber-500'} pl-3">
+          <p class="text-sm font-medium">
+            {task.title}
+            {#if task.status === 'paused'}
+              <span class="badge variant-soft-error">暂停关闭</span>
+            {/if}
+          </p>
           <p class="mt-1 text-xs text-surface-500-400">{task.signalId} · {task.owner} · 截止 {task.dueAt}</p>
         </div>
       {/each}
