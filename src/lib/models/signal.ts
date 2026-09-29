@@ -12,6 +12,10 @@ export const signalStatuses = [
 export const riskLevels = ['low', 'medium', 'high', 'critical'] as const;
 export const evidenceStrengths = ['strong', 'moderate', 'weak', 'contrary'] as const;
 
+export const versionStatuses = ['active', 'invalid'] as const;
+
+export type VersionStatus = (typeof versionStatuses)[number];
+
 export const createSignalSchema = z.object({
   title: z.string().trim().min(6, '信号标题至少 6 个字符'),
   product: z.string().trim().min(2, '请输入产品名称'),
@@ -44,7 +48,16 @@ export const versionSchema = z.object({
   author: z.string().trim().min(2, '请填写版本作者'),
   summary: z.string().trim().min(8, '结论摘要至少 8 个字符'),
   disposition: z.enum(['continue_observation', 'risk_communication', 'corrective_action']),
-  rationale: z.string().trim().min(6, '请填写判断依据')
+  rationale: z.string().trim().min(6, '请填写判断依据'),
+  evidenceIds: z.array(z.string().min(1)).min(1, '请选择结论依据的证据')
+});
+
+export const evidenceStrengthSchema = z.object({
+  id: z.string().min(1),
+  evidenceId: z.string().min(1),
+  strength: z.enum(evidenceStrengths),
+  reason: z.string().trim().min(4, '请填写标记变化说明'),
+  actor: z.string().trim().min(2, '请填写操作人')
 });
 
 export type SignalStatus = (typeof signalStatuses)[number];
@@ -62,6 +75,7 @@ export interface EvidenceItem {
   batch: string;
   note: string;
   createdAt: string;
+  strengthChangedAt?: string;
 }
 
 export interface InvestigationTask {
@@ -69,7 +83,7 @@ export interface InvestigationTask {
   title: string;
   owner: string;
   dueAt: string;
-  status: 'open' | 'in_progress' | 'done';
+  status: 'open' | 'in_progress' | 'done' | 'paused';
 }
 
 export interface CaseVersion {
@@ -80,6 +94,11 @@ export interface CaseVersion {
   disposition: Disposition;
   rationale: string;
   createdAt: string;
+  evidenceIds: string[];
+  status: VersionStatus;
+  invalidatedAt?: string;
+  invalidatedBy?: string;
+  invalidatedReason?: string;
 }
 
 export interface AuditEntry {

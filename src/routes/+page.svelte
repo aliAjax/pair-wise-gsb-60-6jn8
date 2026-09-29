@@ -12,14 +12,18 @@
       .filter((task) => task.status !== 'done' && task.dueAt < new Date().toISOString().slice(0, 10))
       .map((task) => ({ ...task, signalId: signal.id }))
   );
+  $: reviewSignals = signals.filter(
+    (signal) => signal.status === 'review' || signal.versions.some((version) => version.status === 'invalid')
+  );
 
   $: metrics = [
     { label: '开放信号', value: openSignals.length, note: '含调查、观察与处置队列' },
     { label: '高及以上风险', value: criticalSignals.length, note: '需复核人优先确认' },
+    { label: '待复核结论', value: reviewSignals.length, note: '相反证据导致结论失效' },
     {
       label: '未关闭任务',
       value: signals.flatMap((signal) => signal.tasks).filter((task) => task.status !== 'done').length,
-      note: '跨信号调查任务'
+      note: '跨信号调查任务（含暂停）'
     },
     { label: '逾期任务', value: overdueTasks.length, note: '按任务截止日计算' }
   ];
@@ -38,7 +42,7 @@
 
 <section class="workspace-grid mb-6">
   {#each metrics as metric}
-    <article class="col-span-12 rounded border border-surface-300-700 bg-surface-100-900 p-4 sm:col-span-6 xl:col-span-3">
+    <article class="col-span-12 rounded border border-surface-300-700 bg-surface-100-900 p-4 sm:col-span-6 xl:col-span-3 2xl:col-span-2">
       <p class="text-sm text-surface-500-400">{metric.label}</p>
       <p class="metric-value mt-2 text-3xl font-semibold">{metric.value}</p>
       <p class="mt-2 text-xs text-surface-500-400">{metric.note}</p>

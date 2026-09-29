@@ -43,6 +43,9 @@
           <td>
             <p class="metric-value font-semibold">{signal.occurrenceRate.toFixed(2)}%</p>
             <p class="text-xs text-surface-500-400">{signal.reportCount} 条报告</p>
+            {#if signal.versions.some((version) => version.status === 'invalid')}
+              <span class="badge variant-soft-error mt-1">结论失效</span>
+            {/if}
           </td>
           <td>{signal.owner}</td>
           <td>{signal.updatedAt.slice(0, 10)}</td>
